@@ -1,5 +1,12 @@
-use hyper::{Client, StatusCode, Uri};
+use http_body_util::combinators::BoxBody;
+use hyper::body::Bytes;
+use hyper::{StatusCode, Uri};
+use hyper_util::{
+    client::legacy::{connect::HttpConnector, Client},
+    rt::TokioExecutor,
+};
 use serial_test::serial;
+use std::convert::Infallible;
 use std::env;
 use test_context::{test_context, AsyncTestContext};
 use tokiotest_httpserver::handler::HandlerBuilder;
@@ -15,7 +22,8 @@ async fn test_get_respond_200(ctx: &mut PortContext) {
             .build(),
     );
 
-    let resp = Client::new()
+    let resp = Client::builder(TokioExecutor::new())
+        .build::<_, BoxBody<Bytes, Infallible>>(HttpConnector::new())
         .get(Uri::from_static("http://localhost:54321/ok"))
         .await
         .unwrap();
@@ -33,7 +41,8 @@ async fn test_get_respond_404(ctx: &mut PortContext) {
             .build(),
     );
 
-    let resp = Client::new()
+    let resp = Client::builder(TokioExecutor::new())
+        .build::<_, BoxBody<Bytes, Infallible>>(HttpConnector::new())
         .get(Uri::from_static("http://localhost:54321/notfound"))
         .await
         .unwrap();

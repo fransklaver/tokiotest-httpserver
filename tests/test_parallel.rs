@@ -1,4 +1,11 @@
-use hyper::{Client, StatusCode};
+use http_body_util::combinators::BoxBody;
+use hyper::body::Bytes;
+use hyper::StatusCode;
+use hyper_util::{
+    client::legacy::{connect::HttpConnector, Client},
+    rt::TokioExecutor,
+};
+use std::convert::Infallible;
 use test_context::test_context;
 use tokiotest_httpserver::handler::HandlerBuilder;
 use tokiotest_httpserver::HttpTestContext;
@@ -12,7 +19,11 @@ async fn test_get_respond_200(ctx: &mut HttpTestContext) {
             .build(),
     );
 
-    let resp = Client::new().get(ctx.uri("/ok")).await.unwrap();
+    let resp = Client::builder(TokioExecutor::new())
+        .build::<_, BoxBody<Bytes, Infallible>>(HttpConnector::new())
+        .get(ctx.uri("/ok"))
+        .await
+        .unwrap();
 
     assert_eq!(200, resp.status());
 }
@@ -26,7 +37,11 @@ async fn test_get_respond_404(ctx: &mut HttpTestContext) {
             .build(),
     );
 
-    let resp = Client::new().get(ctx.uri("/notfound")).await.unwrap();
+    let resp = Client::builder(TokioExecutor::new())
+        .build::<_, BoxBody<Bytes, Infallible>>(HttpConnector::new())
+        .get(ctx.uri("/notfound"))
+        .await
+        .unwrap();
 
     assert_eq!(404, resp.status());
 }

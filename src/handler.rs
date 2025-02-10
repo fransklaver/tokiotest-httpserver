@@ -1,12 +1,14 @@
 use crate::StatusCode;
 use futures::future::BoxFuture;
-use hyper::{Body, HeaderMap, Method, Request};
+use http_body_util::combinators::BoxBody;
+use hyper::body::{Bytes, Incoming};
+use hyper::{HeaderMap, Method, Request};
 use std::convert::Infallible;
 use std::sync::Arc;
 
-pub type Response = hyper::Response<hyper::Body>;
+pub type Response = hyper::Response<BoxBody<Bytes, Infallible>>;
 pub type HandlerCallback = Arc<
-    dyn Fn(Request<hyper::Body>) -> BoxFuture<'static, Result<Response, Infallible>> + Send + Sync,
+    dyn Fn(Request<Incoming>) -> BoxFuture<'static, Result<Response, Infallible>> + Send + Sync,
 >;
 
 #[derive(Default, Clone)]
@@ -50,7 +52,7 @@ impl HandlerBuilder {
             status_code,
             headers,
         } = self;
-        Arc::new(move |req: Request<Body>| {
+        Arc::new(move |req: Request<Incoming>| {
             let cloned_path = path.clone();
             let cloned_method = method.clone();
             let cloned_headers = headers.clone();
@@ -61,12 +63,12 @@ impl HandlerBuilder {
                 {
                     Ok(hyper::Response::builder()
                         .status(status_code)
-                        .body(Body::empty())
+                        .body(BoxBody::default())
                         .unwrap())
                 } else {
                     Ok(hyper::Response::builder()
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(Body::empty())
+                        .body(BoxBody::default())
                         .unwrap())
                 }
             })
@@ -86,9 +88,9 @@ impl HandlerBuilder {
     }
 }
 
-pub async fn default_handle(_req: Request<Body>) -> Result<Response, Infallible> {
+pub async fn default_handle(_req: Request<Incoming>) -> Result<Response, Infallible> {
     Ok(hyper::Response::builder()
         .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .body(Body::empty())
+        .body(BoxBody::default())
         .unwrap())
 }

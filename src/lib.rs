@@ -2,19 +2,23 @@
 pub mod handler;
 
 use crate::handler::{default_handle, HandlerCallback};
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Server, StatusCode, Uri};
+use hyper::service::service_fn;
+use hyper::{StatusCode, Uri};
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::graceful::GracefulShutdown;
 use lazy_static::lazy_static;
 use queues::{queue, IsQueue, Queue};
 use std::collections::BinaryHeap;
 use std::env;
-use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use test_context::AsyncTestContext;
+use tokio::net::TcpListener;
+use tokio::select;
 use tokio::sync::oneshot::{Receiver, Sender};
 use tokio::task::JoinHandle;
+use tokio::time::Duration;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub static TOKIOTEST_HTTP_PORT_ENV: &str = "TOKIOTEST_HTTP_PORT";
@@ -40,7 +44,7 @@ pub fn release_port(port: u16) {
 pub struct HttpTestContext {
     pub port: u16,
     pub handlers: Arc<Mutex<Queue<HandlerCallback>>>,
-    server_handler: JoinHandle<Result<(), hyper::Error>>,
+    server_handler: JoinHandle<Result<(), Error>>,
     sender: Sender<()>,
 }
 
@@ -58,26 +62,47 @@ impl HttpTestContext {
 
 pub async fn run_service(
     addr: SocketAddr,
-    rx: Receiver<()>,
+    mut rx: Receiver<()>,
     handlers: Arc<Mutex<Queue<HandlerCallback>>>,
-) -> impl Future<Output = Result<(), hyper::Error>> {
-    let new_service = make_service_fn(move |_| {
-        let cloned_handlers = handlers.clone();
-        async {
-            Ok::<_, Error>(service_fn(move |req| match cloned_handlers.lock() {
-                Ok(mut handlers_rw) => match handlers_rw.remove() {
-                    Ok(handler) => handler(req),
-                    Err(_err) => Box::pin(default_handle(req)),
-                },
-                Err(_err_lock) => Box::pin(default_handle(req)),
-            }))
+) -> Result<(), Error> {
+    let graceful = GracefulShutdown::new();
+    let listener = TcpListener::bind(addr).await?;
+    loop {
+        select! {
+            conn = listener.accept() => {
+                let (stream, _) = conn?;
+                let io = TokioIo::new(stream);
+                let cloned_handlers = handlers.clone();
+                let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+                let conn = builder.serve_connection_with_upgrades(
+                    io,
+                    service_fn(move |req| match cloned_handlers.lock() {
+                        Ok(mut handlers_rw) => match handlers_rw.remove() {
+                            Ok(handler) => handler(req),
+                            Err(_err) => Box::pin(default_handle(req)),
+                        },
+                        Err(_err_lock) => Box::pin(default_handle(req)),
+                    }),
+                );
+                tokio::spawn(graceful.watch(conn.into_owned()));
+            },
+            _ = &mut rx => {
+                drop(listener);
+                break;
+            }
         }
-    });
-    Server::bind(&addr)
-        .serve(new_service)
-        .with_graceful_shutdown(async {
-            rx.await.ok();
-        })
+    }
+    select! {
+        _ = graceful.shutdown() => {
+            Ok(())
+        },
+        _ = tokio::time::sleep(Duration::from_secs(10)) => {
+            Err(Box::new(tokio::io::Error::new(
+                tokio::io::ErrorKind::TimedOut,
+                "Server graceful shutdown timed out",
+            )))
+        },
+    }
 }
 
 impl AsyncTestContext for HttpTestContext {
@@ -89,7 +114,7 @@ impl AsyncTestContext for HttpTestContext {
         let addr = SocketAddr::new("127.0.0.1".parse().unwrap(), port);
         let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
         let handlers: Arc<Mutex<Queue<HandlerCallback>>> = Arc::new(Mutex::new(queue![]));
-        let server_handler = tokio::spawn(run_service(addr, receiver, handlers.clone()).await);
+        let server_handler = tokio::spawn(run_service(addr, receiver, handlers.clone()));
         HttpTestContext {
             server_handler,
             sender,
@@ -107,15 +132,29 @@ impl AsyncTestContext for HttpTestContext {
 
 #[cfg(test)]
 mod test {
+    use std::convert::Infallible;
+
     use crate::handler::HandlerBuilder;
     use crate::HttpTestContext;
-    use hyper::{Body, Client, HeaderMap, Method, Request, StatusCode};
+    use http_body_util::{combinators::BoxBody, Full};
+    use hyper::{body::Bytes, HeaderMap, Method, Request, StatusCode};
+    use hyper_util::{
+        client::legacy::{connect::HttpConnector, Client},
+        rt::TokioExecutor,
+    };
     use test_context::test_context;
+
+    macro_rules! make_client {
+        () => {
+            Client::builder(TokioExecutor::new())
+                .build::<_, BoxBody<Bytes, Infallible>>(HttpConnector::new())
+        };
+    }
 
     #[test_context(HttpTestContext)]
     #[tokio::test]
     async fn test_get_without_expect_should_send_500(ctx: &mut HttpTestContext) {
-        let resp = Client::new().get(ctx.uri("/whatever")).await.unwrap();
+        let resp = make_client!().get(ctx.uri("/whatever")).await.unwrap();
         assert_eq!(500, resp.status());
     }
 
@@ -128,7 +167,7 @@ mod test {
                 .build(),
         );
 
-        let resp = Client::new().get(ctx.uri("/unknown")).await.unwrap();
+        let resp = make_client!().get(ctx.uri("/unknown")).await.unwrap();
 
         assert_eq!(404, resp.status());
     }
@@ -142,10 +181,10 @@ mod test {
                 .build(),
         );
 
-        let resp = Client::new().get(ctx.uri("/foo")).await.unwrap();
+        let resp = make_client!().get(ctx.uri("/foo")).await.unwrap();
         assert_eq!(200, resp.status());
 
-        let resp = Client::new().get(ctx.uri("/foo")).await.unwrap();
+        let resp = make_client!().get(ctx.uri("/foo")).await.unwrap();
         assert_eq!(500, resp.status());
     }
 
@@ -167,16 +206,16 @@ mod test {
                 .build(),
         );
 
-        let resp = Client::new().get(ctx.uri("/headers")).await.unwrap();
+        let resp = make_client!().get(ctx.uri("/headers")).await.unwrap();
         assert_eq!(500, resp.status());
 
         let req = Request::builder()
             .method(Method::GET)
             .uri(ctx.uri("/headers"))
             .header("foo", "bar")
-            .body(Body::empty())
+            .body(BoxBody::default())
             .unwrap();
-        let resp = Client::new().request(req).await.unwrap();
+        let resp = make_client!().request(req).await.unwrap();
         assert_eq!(200, resp.status());
     }
 
@@ -193,10 +232,10 @@ mod test {
         let req = Request::builder()
             .method(Method::POST)
             .uri(ctx.uri("/bar"))
-            .body(Body::from("foo=bar"))
+            .body(BoxBody::new(Full::new(Bytes::from("foo=bar"))))
             .expect("request builder");
 
-        let resp = Client::new().request(req).await.unwrap();
+        let resp = make_client!().request(req).await.unwrap();
 
         assert_eq!(200, resp.status());
     }
