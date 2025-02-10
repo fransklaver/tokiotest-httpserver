@@ -47,7 +47,6 @@ struct PortContext {
     http_context: HttpTestContext,
 }
 
-#[async_trait::async_trait]
 impl AsyncTestContext for PortContext {
     async fn setup() -> PortContext {
         let port_string = "54321".to_string();

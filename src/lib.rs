@@ -80,7 +80,6 @@ pub async fn run_service(
         })
 }
 
-#[async_trait::async_trait]
 impl AsyncTestContext for HttpTestContext {
     async fn setup() -> HttpTestContext {
         let port: u16 = match env::var(TOKIOTEST_HTTP_PORT_ENV) {
