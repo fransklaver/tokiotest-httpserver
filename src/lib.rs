@@ -1,26 +1,27 @@
 #![doc = include_str!("../README.md")]
 pub mod handler;
 
+use crate::handler::{default_handle, HandlerCallback};
+use hyper::service::{make_service_fn, service_fn};
+use hyper::{Server, StatusCode, Uri};
+use lazy_static::lazy_static;
+use queues::{queue, IsQueue, Queue};
 use std::collections::BinaryHeap;
+use std::env;
 use std::future::Future;
-use std::net::{SocketAddr};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::Mutex;
 use test_context::AsyncTestContext;
 use tokio::sync::oneshot::{Receiver, Sender};
 use tokio::task::JoinHandle;
-use hyper::{Server, StatusCode, Uri};
-use hyper::service::{make_service_fn, service_fn};
-use lazy_static::lazy_static;
-use std::sync::Mutex;
-use std::sync::Arc;
-use queues::{Queue, IsQueue, queue};
-use crate::handler::{default_handle, HandlerCallback};
-use std::env;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub static TOKIOTEST_HTTP_PORT_ENV: &str = "TOKIOTEST_HTTP_PORT";
 
 lazy_static! {
-    static ref PORTS: Mutex<BinaryHeap<u16>> = Mutex::new(BinaryHeap::from((12300u16..12400u16).collect::<Vec<u16>>()));
+    static ref PORTS: Mutex<BinaryHeap<u16>> =
+        Mutex::new(BinaryHeap::from((12300u16..12400u16).collect::<Vec<u16>>()));
 }
 
 /// function that can be called to avoid port collision when tests have to open a listen port
@@ -49,30 +50,34 @@ impl HttpTestContext {
     }
 
     pub fn uri(&self, path: &str) -> Uri {
-        format!("http://{}:{}{}", "localhost", self.port, path).parse::<Uri>().unwrap()
+        format!("http://{}:{}{}", "localhost", self.port, path)
+            .parse::<Uri>()
+            .unwrap()
     }
 }
 
-pub async fn run_service(addr: SocketAddr, rx: Receiver<()>,
-    handlers: Arc<Mutex<Queue<HandlerCallback>>>) -> impl Future<Output = Result<(), hyper::Error>> {
-
+pub async fn run_service(
+    addr: SocketAddr,
+    rx: Receiver<()>,
+    handlers: Arc<Mutex<Queue<HandlerCallback>>>,
+) -> impl Future<Output = Result<(), hyper::Error>> {
     let new_service = make_service_fn(move |_| {
         let cloned_handlers = handlers.clone();
         async {
-            Ok::<_, Error>(service_fn(move |req| {
-                match cloned_handlers.lock() {
-                    Ok(mut handlers_rw) => {
-                        match handlers_rw.remove() {
-                            Ok(handler) => { handler(req) }
-                            Err(_err) => { Box::pin(default_handle(req)) }
-                        }
-                    }
-                    Err(_err_lock) => Box::pin(default_handle(req))
-                }
+            Ok::<_, Error>(service_fn(move |req| match cloned_handlers.lock() {
+                Ok(mut handlers_rw) => match handlers_rw.remove() {
+                    Ok(handler) => handler(req),
+                    Err(_err) => Box::pin(default_handle(req)),
+                },
+                Err(_err_lock) => Box::pin(default_handle(req)),
             }))
         }
     });
-    Server::bind(&addr).serve(new_service).with_graceful_shutdown(async { rx.await.ok(); })
+    Server::bind(&addr)
+        .serve(new_service)
+        .with_graceful_shutdown(async {
+            rx.await.ok();
+        })
 }
 
 #[async_trait::async_trait]
@@ -80,7 +85,7 @@ impl AsyncTestContext for HttpTestContext {
     async fn setup() -> HttpTestContext {
         let port: u16 = match env::var(TOKIOTEST_HTTP_PORT_ENV) {
             Ok(port_str) => port_str.parse::<u16>().unwrap(),
-            Err(_e) => take_port()
+            Err(_e) => take_port(),
         };
         let addr = SocketAddr::new("127.0.0.1".parse().unwrap(), port);
         let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
@@ -90,7 +95,7 @@ impl AsyncTestContext for HttpTestContext {
             server_handler,
             sender,
             port,
-            handlers
+            handlers,
         }
     }
 
@@ -103,10 +108,10 @@ impl AsyncTestContext for HttpTestContext {
 
 #[cfg(test)]
 mod test {
-    use hyper::{StatusCode, Method, Request, Body, HeaderMap, Client};
-    use crate::{HttpTestContext};
-    use test_context::test_context;
     use crate::handler::HandlerBuilder;
+    use crate::HttpTestContext;
+    use hyper::{Body, Client, HeaderMap, Method, Request, StatusCode};
+    use test_context::test_context;
 
     #[test_context(HttpTestContext)]
     #[tokio::test]
@@ -118,7 +123,11 @@ mod test {
     #[test_context(HttpTestContext)]
     #[tokio::test]
     async fn test_get_respond_404(ctx: &mut HttpTestContext) {
-        ctx.add(HandlerBuilder::new("/unknown").status_code(StatusCode::NOT_FOUND).build());
+        ctx.add(
+            HandlerBuilder::new("/unknown")
+                .status_code(StatusCode::NOT_FOUND)
+                .build(),
+        );
 
         let resp = Client::new().get(ctx.uri("/unknown")).await.unwrap();
 
@@ -128,7 +137,11 @@ mod test {
     #[test_context(HttpTestContext)]
     #[tokio::test]
     async fn test_get_endpoint(ctx: &mut HttpTestContext) {
-        ctx.add(HandlerBuilder::new("/foo").status_code(StatusCode::OK).build());
+        ctx.add(
+            HandlerBuilder::new("/foo")
+                .status_code(StatusCode::OK)
+                .build(),
+        );
 
         let resp = Client::new().get(ctx.uri("/foo")).await.unwrap();
         assert_eq!(200, resp.status());
@@ -142,13 +155,28 @@ mod test {
     async fn test_get_with_headers(ctx: &mut HttpTestContext) {
         let mut headers = HeaderMap::new();
         headers.append("foo", "bar".parse().unwrap());
-        ctx.add(HandlerBuilder::new("/headers").status_code(StatusCode::OK).headers(headers.clone()).build());
-        ctx.add(HandlerBuilder::new("/headers").status_code(StatusCode::OK).headers(headers).build());
+        ctx.add(
+            HandlerBuilder::new("/headers")
+                .status_code(StatusCode::OK)
+                .headers(headers.clone())
+                .build(),
+        );
+        ctx.add(
+            HandlerBuilder::new("/headers")
+                .status_code(StatusCode::OK)
+                .headers(headers)
+                .build(),
+        );
 
         let resp = Client::new().get(ctx.uri("/headers")).await.unwrap();
         assert_eq!(500, resp.status());
 
-        let req = Request::builder().method(Method::GET).uri(ctx.uri("/headers")).header("foo", "bar").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(ctx.uri("/headers"))
+            .header("foo", "bar")
+            .body(Body::empty())
+            .unwrap();
         let resp = Client::new().request(req).await.unwrap();
         assert_eq!(200, resp.status());
     }
@@ -156,9 +184,12 @@ mod test {
     #[test_context(HttpTestContext)]
     #[tokio::test]
     async fn test_post_endpoint(ctx: &mut HttpTestContext) {
-        ctx.add(HandlerBuilder::new("/bar")
-            .status_code(StatusCode::OK)
-            .method(Method::POST).build());
+        ctx.add(
+            HandlerBuilder::new("/bar")
+                .status_code(StatusCode::OK)
+                .method(Method::POST)
+                .build(),
+        );
 
         let req = Request::builder()
             .method(Method::POST)
