@@ -99,7 +99,7 @@ impl AsyncTestContext for HttpTestContext {
     }
 
     async fn teardown(self) {
-        let _ = self.sender.send(()).unwrap();
+        self.sender.send(()).unwrap();
         let _ = tokio::join!(self.server_handler);
         release_port(self.port);
     }
