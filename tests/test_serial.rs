@@ -59,7 +59,7 @@ impl AsyncTestContext for PortContext {
     }
 
     async fn teardown(self) {
-        let _ = self.http_context.teardown();
+        self.http_context.teardown().await;
         env::remove_var("TOKIOTEST_HTTP_PORT");
     }
 }
