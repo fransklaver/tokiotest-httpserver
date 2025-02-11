@@ -8,7 +8,7 @@ use tokiotest_httpserver::HttpTestContext;
 #[test_context(PortContext)]
 #[tokio::test]
 #[serial]
-async fn test_get_respond_200(&mut ctx: PortContext) {
+async fn test_get_respond_200(ctx: &mut PortContext) {
     ctx.http_context.add(
         HandlerBuilder::new("/ok")
             .status_code(StatusCode::OK)
@@ -26,7 +26,7 @@ async fn test_get_respond_200(&mut ctx: PortContext) {
 #[test_context(PortContext)]
 #[tokio::test]
 #[serial]
-async fn test_get_respond_404(&mut ctx: PortContext) {
+async fn test_get_respond_404(ctx: &mut PortContext) {
     ctx.http_context.add(
         HandlerBuilder::new("/notfound")
             .status_code(StatusCode::NOT_FOUND)
